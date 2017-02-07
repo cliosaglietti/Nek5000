@@ -21,16 +21,11 @@ C-----------------------------------------------------------------------
      $       , ifprsl(  ldimt1,0:lpert)
  
       LOGICAL  IFANYP
-      common /rdump/ ntdump
       common /inelr/ nelrr
       common /ctmp1/ work(lx1,ly1,lz1,lelv)
      $ ,             ta1 (lx2,ly1,lz1)
      $ ,             ta2 (lx2,ly2,lz1)
       integer*8 ntotg,nn
-
-      common /solnconsvar/ u(lx1,ly1,lz1,toteq,lelcmt) ! cmt only
-      common /otherpvar/   phig(lx1,ly1,lz1,lelcmt)    ! cmt only
-      common /cmtgasprop/  csound(lx1,ly1,lz1,lelcmt)  ! cmt only
 
       real psmax(ldimt)
 
@@ -43,8 +38,6 @@ C-----------------------------------------------------------------------
       ntott=nelt*nxyz1
       ntotv=nelv*nxyz1
       ltott=lelt*nxyz1
-      ntotcv=lelt*nxyz1*toteq
-
 
       call rzero(vx,ntott)
       call rzero(vy,ntott)
@@ -56,17 +49,8 @@ C-----------------------------------------------------------------------
 
       jp = 0                  ! Set counter for perturbation analysis
 
-      if (ifcmt) then
-         call rzero(phig,ltott)
-         call rzero(csound,ltott)
-         call rzero(vtrans,ltott*ldimt1)
-         call rzero(vdiff ,ltott*ldimt1)
-         call rzero(u,ntotcv)
-      endif
-
       irst = param(46)        ! for lee's restart (rarely used)
       if (irst.gt.0)  call setup_convect(2)
-
 
 c     If moving geometry then add a perturbation to the
 c     mesh coordinates (see Subroutine INIGEOM)
@@ -203,8 +187,6 @@ C     the time-stepping procedure (no flow calculation) (01/18/91 -EMR).
 C     Ensure that all processors have the same time as node 0.
       if (nid.ne.0) time=0.0
       time=glsum(time,1)
-      ntdump=0
-      if (timeio.ne.0.0) ntdump = int( time/timeio )
 
 C     Ensure that initial field is continuous!
 
@@ -256,8 +238,7 @@ c        if(psmax(i).eq.0) call perturb(t(1,1,1,1,1+i),i+2,small)
 c     enddo
 c     ifield = ifldsave
     
-c     if (ifflow.and..not.ifdg)  then  ! Current dg is for scalars only
-      if (ifflow.and..not.ifcmt) then  ! pff, 11/4/15
+      if (ifflow.and..not.ifdg)  then  ! Current dg is for scalars only
          ifield = 1
          call opdssum(vx,vy,vz)
          call opcolv (vx,vy,vz,vmult)
@@ -273,7 +254,6 @@ c     if (ifmhd.and..not.ifdg) then   ! Current dg is for scalars only
       endif
 
       if (ifheat.and..not.ifdg) then  ! Don't project if using DG
-       if (.not.ifcmt) then
          ifield = 2
          call dssum(t ,nx1,ny1,nz1)
          call col2 (t ,tmult,ntott)
@@ -285,7 +265,6 @@ c     if (ifmhd.and..not.ifdg) then   ! Current dg is for scalars only
               call col2 (t(1,1,1,1,i-1),vmult,ntotv)
             endif
          enddo
-       endif
       endif
 c
 c     if (ifpert.and..not.ifdg) then ! Still not DG
@@ -374,14 +353,15 @@ c print max values
          endif
       endif
 
+      if (iflomach .and. ifdp0dt) then
+        if (p0th.le.0) call exitti('Invalid thermodynamic pressure!$',1)
+        if (gamma0.lt.0) call exitti('Invalid gamma0!$',1)
+      endif
 
       if (ifrest(0,jp)) then !  mesh has been read in.
          if (nio.eq.0) write(6,*) 'Restart: recompute geom. factors.'
          call geom_reset(1)  !  recompute geometric factors
       endif
-
-c     ! save velocity on fine mesh for dealiasing
-      call setup_convect(2)
 
 c     call outpost(vx,vy,vz,pr,t,'   ')
 c     call exitti('setic exit$',nelv)
@@ -607,7 +587,6 @@ c use new reader (only binary support)
             call sioflag(ndumps,fname,initc(ifile))
             call mfi(fname,ifile)
          enddo
-         call setup_convect(3)
          if (nid.ne.0) time=0
          time = glmax(time,1) ! Sync time across processors
          return
@@ -1207,7 +1186,9 @@ C     If no fields were explicitly specified, assume getting all fields.
          ENDIF
          if (ifflow) ifgetp=.true.
          if (ifheat) ifgett=.true.
-         if (ifcmt)  ifgett=.true.
+#ifdef CMTNEK
+         ifgett=.true. ! CMT-nek still not compatible with IFHEAT
+#endif
          do 410 i=1,ldimt-1
             ifgtps(i)=.TRUE.
   410    continue
@@ -1701,10 +1682,7 @@ c-----------------------------------------------------------------------
       include 'PARALLEL'
       include 'NEKUSE'
 
-      common /solnconsvar/ u(lx1,ly1,lz1,toteq,lelcmt) ! cmt only
-      common /otherpvar/   phig(lx1,ly1,lz1,lelcmt)    ! cmt only
-      common /cmtgasprop/  csound(lx1,ly1,lz1,lelcmt)  ! cmt only
-      integer eqnum,e,eg
+      integer e,eg
 
       nel   = nelfld(ifield)
 
@@ -1770,45 +1748,6 @@ C
 
       endif
 
-! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-!     cmt-nek
-!
-!     User should be responsible for agreement between varsic and
-!     vxyz,rho, prsic, but a consistency check here would be wise.
-
-      if (ifcmt) then
-         do e=1,nel
-            eg = lglel(e)
-            do k=1,nz1
-            do j=1,ny1
-            do i=1,nx1           
-               call nekasgn (i,j,k,e)
-               call useric  (i,j,k,eg)
-               if (ifield.eq.1) then
-                  vx(i,j,k,e) = ux
-                  vy(i,j,k,e) = uy
-                  vz(i,j,k,e) = uz
-                  vtrans(i,j,k,e,ifield)=rho
-                  phig(i,j,k,e)=phi
-                  pr(i,j,k,e) =pres
-                  do eqnum=1,toteq
-                     u(i,j,k,eqnum,e)=varsic(eqnum)
-                  enddo
-                  if (ifvisc) vdiff(i,j,k,e,ifield)=mu
-               else
-                  t(i,j,k,e,ifield-1) = temp
-                  if (ifvisc) then
-                     if (ifield.eq.2) vdiff(i,j,k,e,ifield)=udiff
-                     if (ifield.eq.3) vdiff(i,j,k,e,ifield)=lambda
-                  endif
-               endif
-            enddo
-            enddo
-            enddo
-         enddo
-      endif
-!     cmt-nek
-! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
       return
       END
@@ -2377,28 +2316,39 @@ c-----------------------------------------------------------------------
       subroutine parse_std_hdr(hdr)
       include 'SIZE'
       include 'INPUT'
+      include 'SOLN'
       include 'PARALLEL'
       include 'RESTART'
 
       character*132 hdr
       character*4 dummy
 
-      read(hdr,*,err=99) dummy
+      p0thr = -1
+
+      read(hdr,*,iostat=ierr) dummy
      $         ,  wdsizr,nxr,nyr,nzr,nelr,nelgr,timer,istpr
      $         ,  ifiler,nfiler
      $         ,  rdcode      ! 74+20=94
+     $         ,  p0thr
 
-#ifdef MPIIO
-      if ((nelr/np + np).gt.lelr) then
-        write(6,'(A,I6)') 'ABORT: nelr>lelr on rank',nid
-        call exitt
+      if (ierr.gt.0) then ! try again without mean pressure
+        read(hdr,*,err=99) dummy
+     $         ,  wdsizr,nxr,nyr,nzr,nelr,nelgr,timer,istpr
+     $         ,  ifiler,nfiler
+     $         ,  rdcode      ! 74+20=94
       endif
-#else
-      if (nelr.gt.lelr) then
-        write(6,'(A,I6)') 'ABORT: nelr>lelr on rank',nid
-        call exitt
-      endif
-#endif
+
+c#ifdef MPIIO
+c      if ((nelr/np + np).gt.lelr) then
+c        write(6,'(A,I6)') 'ABORT: nelr>lelr on rank',nid
+c        call exitt
+c      endif
+c#else
+c      if (nelr.gt.lelr) then
+c        write(6,'(A,I6)') 'ABORT: nelr>lelr on rank',nid
+c        call exitt
+c      endif
+c#endif
 
       ifgtim  = .true.  ! always get time
       ifgetxr = .false.
@@ -2445,6 +2395,9 @@ c-----------------------------------------------------------------------
          endif
       endif
 
+      p0th = 1 
+      if (p0thr.gt.0) p0th = p0thr
+
       return
 
    99 continue   !  If we got here, then the May 2008 variant of std hdr
@@ -2468,7 +2421,6 @@ c                4  7  10  13   23    33    53    62     68     74
      $         , ifiler,nfiler
      $         , (rlcode(k),k=1,20)                   ! 74+20=94
     1 format(4x,i2,3i3,2i10,e20.13,i9,2i6,20a1)
-
 
       if (nid.eq.0) write(6,*) 'WARNING: reading depreacted header!'
 
@@ -2645,13 +2597,14 @@ c               if(nid.eq.0) write(6,'(A,I2,A)') ' Reading ps',k,' field'
       return
       end
 c-----------------------------------------------------------------------
-      subroutine mbyte_open(hname,fid,ierr) ! open  blah000.fldnn
+      subroutine mbyte_open(hname,fid,ifro,ierr) ! open  blah000.fldnn
       include 'SIZE'
       include 'TSTEP'
       include 'RESTART'
  
       integer fid
       character*132 hname
+      logical ifro
 
       character*8  eight,fmt,s8
       save         eight
@@ -2683,7 +2636,7 @@ c-----------------------------------------------------------------------
       enddo
       
 #ifdef MPIIO
-      call byte_open_mpi(fname,ifh_mbyte,ierr)
+      call byte_open_mpi(fname,ifh_mbyte,ifro,ierr)
       if(nio.eq.0) write(6,6) istep,(fname1(k),k=1,len)
     6 format(1i8,' OPEN: ',132a1)
 #else
@@ -2716,7 +2669,7 @@ c-----------------------------------------------------------------------
       ! rank0 (i/o master) will do a pre-read to get some infos 
       ! we need to have in advance
       if (nid.eq.0) then
-         call mbyte_open(hname,0,ierr) ! open  blah000.fldnn
+         call mbyte_open(hname,0,.TRUE.,ierr) ! open  blah000.fldnn
          if(ierr.ne.0) goto 101
          call blank     (hdr,iHeaderSize)
          call byte_read (hdr, iHeaderSize/4,ierr)
@@ -2747,7 +2700,7 @@ c-----------------------------------------------------------------------
          fid0r = nid / stride
          if (nid.ne.0) then ! don't do it again for rank0
             call blank     (hdr,iHeaderSize)
-            call mbyte_open(hname,fid0r,ierr) ! open  blah000.fldnn
+            call mbyte_open(hname,fid0r,.TRUE.,ierr) ! open  blah000.fldnn
             if(ierr.ne.0) goto 102
             call byte_read (hdr, iHeaderSize/4,ierr)  
             if(ierr.ne.0) goto 102
@@ -2762,7 +2715,7 @@ c-----------------------------------------------------------------------
       pid0r = nid
       pid1r = nid
       offs0 = iHeaderSize + 4
-      call mbyte_open(hname,0,ierr)
+      call mbyte_open(hname,0,.TRUE.,ierr)
       ierr=iglmax(ierr,1)
       if(ierr.ne.0) goto 103
 
